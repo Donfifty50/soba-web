@@ -313,32 +313,118 @@ $("#loginForm").addEventListener("submit", async (e) => {
 $("#logout").addEventListener("click", () => sb.auth.signOut());
 sb.auth.onAuthStateChange((_e, s) => showApp(!!s));
 
-/* ---------- Voz ---------- */
+/* ---------- Voz (OpenAI: ouvir e falar) ---------- */
+const player = new Audio(); player.preload = "auto"; player.setAttribute("playsinline", "");
+function silentWav() {
+  const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 16000, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+  let s = ""; new Uint8Array(buf).forEach((b) => s += String.fromCharCode(b));
+  return "data:audio/wav;base64," + btoa(s);
+}
+const SILENCE = silentWav();
+let unlocked = false;
+function unlockSpeech() {
+  if (unlocked) return;
+  try { player.src = SILENCE; const p = player.play(); if (p) p.then(() => { unlocked = true; }).catch(() => {}); } catch (_) {}
+  try { if ("speechSynthesis" in window) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } } catch (_) {}
+}
 let voice = null;
 function pickVoice() {
-  const vs = speechSynthesis.getVoices().filter((v) => /^pt/i.test(v.lang));
-  voice = vs.find((v) => v.lang === "pt-PT" && /enhanced|premium|melhorad/i.test(v.name)) || vs.find((v) => v.lang === "pt-PT") || vs[0] || null;
+  const vs = speechSynthesis.getVoices().filter((x) => /^pt/i.test(x.lang));
+  voice = vs.find((x) => x.lang === "pt-PT" && /enhanced|premium|melhorad/i.test(x.name)) || vs.find((x) => x.lang === "pt-PT") || vs[0] || null;
 }
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-function unlockSpeech() { try { if (!("speechSynthesis" in window)) return; const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } catch (_) {} }
-function say(text) {
+function sayRobot(text) {
   return new Promise((res) => {
     if (!("speechSynthesis" in window)) return res();
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "pt-PT"; if (voice) u.voice = voice; u.rate = 1.02;
-    u.onend = res; u.onerror = res;
-    speechSynthesis.speak(u);
+    const u = new SpeechSynthesisUtterance(text); u.lang = "pt-PT"; if (voice) u.voice = voice;
+    u.onend = res; u.onerror = res; speechSynthesis.speak(u);
   });
 }
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, finalText = "";
+let speakToken = 0;
+async function say(text) {
+  const my = ++speakToken;
+  try {
+    const d = await fn("voz", { acao: "falar", texto: text });
+    if (my !== speakToken) return;
+    await new Promise((res) => {
+      player.onended = res; player.onerror = res; player.onpause = res;
+      player.src = "data:" + (d.tipo || "audio/mpeg") + ";base64," + d.audio;
+      const p = player.play(); if (p) p.catch(() => res());
+    });
+  } catch (e) {
+    if (my !== speakToken) return;
+    console.warn("voz natural indisponível:", e.message);
+    await sayRobot(text);
+  }
+}
+function stopSpeaking() { speakToken++; try { player.pause(); } catch (_) {} try { speechSynthesis.cancel(); } catch (_) {} }
 
 function setOrb(s) {
   $("#orb").dataset.s = s;
-  $("#status").textContent = { idle: "Toca na esfera e fala", listening: "A ouvir… toca para parar", thinking: "A pensar…", speaking: "Toca para interromper" }[s];
+  $("#status").textContent = { idle: "Toca na esfera e fala", listening: "A ouvir… toca quando acabares", thinking: "A pensar…", speaking: "Toca para interromper" }[s];
 }
 function showErr(t) { const e = $("#err"); e.textContent = t; e.hidden = !t; }
+
+/* Gravação com detecção de silêncio: pára sozinha quando acabas de falar. */
+let rec = null, stream = null, chunks = [], vadTimer = null, audioCtx = null;
+function pickMime() {
+  const opts = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"];
+  return opts.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || "";
+}
+function cleanupMic() {
+  clearInterval(vadTimer); vadTimer = null;
+  try { stream && stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+  stream = null;
+}
+async function startListening() {
+  if (!navigator.mediaDevices || !window.MediaRecorder) { showErr("Este browser não grava voz. Escreve em baixo, com o microfone do teclado."); return; }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (_) { showErr("Dá acesso ao microfone: Definições → Safari → Microfone → Permitir. Depois tenta outra vez."); return; }
+  const mime = pickMime();
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  chunks = [];
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = onRecorded;
+  rec.start();
+  setOrb("listening"); $("#heard").hidden = true; $("#reply").hidden = true;
+  // Detecção de voz e silêncio
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    await audioCtx.resume();
+    const src = audioCtx.createMediaStreamSource(stream), an = audioCtx.createAnalyser();
+    an.fftSize = 1024; src.connect(an);
+    const data = new Uint8Array(an.fftSize);
+    let spoke = false, lastLoud = Date.now(); const t0 = Date.now();
+    vadTimer = setInterval(() => {
+      an.getByteTimeDomainData(data);
+      let sum = 0; for (const x of data) { const d = (x - 128) / 128; sum += d * d; }
+      const rms = Math.sqrt(sum / data.length);
+      if (rms > 0.035) { spoke = true; lastLoud = Date.now(); }
+      const now = Date.now();
+      if ((spoke && now - lastLoud > 1400) || (!spoke && now - t0 > 7000) || now - t0 > 45000) stopListening();
+    }, 100);
+  } catch (_) { /* sem detecção: o Ivo toca para parar */ }
+}
+function stopListening() { clearInterval(vadTimer); vadTimer = null; try { rec && rec.state !== "inactive" && rec.stop(); } catch (_) {} }
+async function onRecorded() {
+  const type = (rec && rec.mimeType) || "audio/mp4";
+  cleanupMic();
+  const blob = new Blob(chunks, { type });
+  if (blob.size < 2500) { setOrb("idle"); return; }
+  setOrb("thinking"); $("#heard").textContent = "A perceber…"; $("#heard").hidden = false;
+  try {
+    const b64 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1]); fr.onerror = rej; fr.readAsDataURL(blob); });
+    const d = await fn("voz", { acao: "ouvir", audio: b64, tipo: type.split(";")[0] });
+    const t = (d.texto || "").trim();
+    if (!t) { $("#heard").hidden = true; setOrb("idle"); showErr("Não ouvi nada. Fala mais perto do telemóvel."); return; }
+    ask(t);
+  } catch (e) { setOrb("idle"); $("#heard").hidden = true; showErr(e.message); }
+}
 
 let turns = [];
 try { turns = JSON.parse(sessionStorage.getItem("soba.turns") || "[]"); } catch (_) {}
@@ -356,30 +442,16 @@ async function ask(text) {
     setOrb("speaking"); await say(r);
     loadHoje();
   } catch (e) { turns.pop(); showErr(e.message); }
-  finally { setOrb("idle"); }
+  finally { if ($("#orb").dataset.s !== "listening") setOrb("idle"); }
 }
 
 $("#orb").addEventListener("click", () => {
   const s = $("#orb").dataset.s;
   unlockSpeech();
-  if (s === "speaking") { speechSynthesis.cancel(); setOrb("idle"); return; }
-  if (s === "listening") { rec && rec.stop(); return; }
+  if (s === "speaking") { stopSpeaking(); setOrb("idle"); return; }
+  if (s === "listening") { stopListening(); return; }
   if (s === "thinking") return;
-  if (!SR) { showErr("Este browser não ouve voz. Escreve em baixo, ou usa o microfone do teclado do iPhone."); $("#askIn").focus(); return; }
-  showErr(""); finalText = "";
-  rec = new SR(); rec.lang = "pt-PT"; rec.interimResults = true; rec.continuous = false;
-  rec.onstart = () => setOrb("listening");
-  rec.onresult = (e) => {
-    let t = ""; for (const r of e.results) t += r[0].transcript;
-    finalText = t; $("#heard").textContent = "«" + t + "»"; $("#heard").hidden = false;
-  };
-  rec.onerror = (e) => {
-    setOrb("idle");
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") showErr("Dá acesso ao microfone: Definições → Safari → Microfone. Se usares o SOBA como app no ecrã principal e não funcionar, escreve em baixo com o microfone do teclado.");
-    else if (e.error !== "no-speech" && e.error !== "aborted") showErr("Não consegui ouvir. Tenta outra vez.");
-  };
-  rec.onend = () => { if ($("#orb").dataset.s === "listening") setOrb("idle"); if (finalText.trim()) ask(finalText); };
-  try { rec.start(); } catch (_) { showErr("Não consegui ligar o microfone."); }
+  showErr(""); startListening();
 });
 $("#askForm").addEventListener("submit", (e) => { e.preventDefault(); unlockSpeech(); const t = $("#askIn").value; $("#askIn").value = ""; $("#askIn").blur(); ask(t); });
 
