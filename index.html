@@ -135,6 +135,10 @@ nav.tabs .badge{position:absolute;top:2px;left:calc(50% + 6px);background:var(--
 .doc .md h1{font-family:var(--display);font-size:20px;margin:6px 0}
 .doc .md ul,.doc .md ol{margin:4px 0;padding-left:20px}
 .doc .md p{margin:6px 0}
+.doc .md .tw{overflow-x:auto;margin:8px 0}
+.doc .md table{border-collapse:collapse;font-size:13.5px;min-width:100%}
+.doc .md th{background:var(--surface2);text-align:left;font-weight:600}
+.doc .md th,.doc .md td{border:1px solid var(--line);padding:6px 8px;vertical-align:top}
 .doc img.gen{width:100%;border-radius:12px;background:var(--surface2);display:block}
 .doc .slides{display:flex;flex-direction:column;gap:6px;counter-reset:sl}
 .doc .slides div{background:var(--surface2);border-radius:10px;padding:8px 12px;font-size:14px}
@@ -475,10 +479,21 @@ function md(src) {
   const lines = esc(src).split("\n"); let out = "", list = null;
   const inline = (t) => t.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/(^|\s)\*(.+?)\*/g, "$1<i>$2</i>");
   const close = () => { if (list) { out += `</${list}>`; list = null; } };
-  for (const raw of lines) {
-    const l = raw.trimEnd();
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li].trimEnd();
     let m;
-    if ((m = l.match(/^(#{1,3})\s+(.*)/))) { close(); const n = Math.max(1, Math.min(3, m[1].length)); out += `<h${n}>${inline(m[2])}</h${n}>`; }
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      close(); const rows = [];
+      while (li < lines.length && /^\s*\|.*\|\s*$/.test(lines[li])) {
+        const cells = lines[li].trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) rows.push(cells);
+        li++;
+      }
+      li--;
+      out += `<div class="tw"><table>${rows.map((r, ri) => `<tr>${r.map((c) => ri === 0 ? `<th>${inline(c)}</th>` : `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+      continue;
+    }
+    if ((m = l.match(/^(#{1,4})\s+(.*)/))) { close(); const n = Math.max(1, Math.min(3, m[1].length)); out += `<h${n}>${inline(m[2])}</h${n}>`; }
     else if ((m = l.match(/^\s*[-•]\s+(.*)/))) { if (list !== "ul") { close(); out += "<ul>"; list = "ul"; } out += `<li>${inline(m[1])}</li>`; }
     else if ((m = l.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== "ol") { close(); out += "<ol>"; list = "ol"; } out += `<li>${inline(m[1])}</li>`; }
     else if (!l.trim()) { close(); }
@@ -502,7 +517,7 @@ function docCard(t, i, short) {
   }
   return `<div class="doc">${head}
     <div class="md ${short ? "short" : ""}" id="md-${i}">${md(t.conteudo)}</div>
-    <div class="row">${short ? `<button class="btn sm" data-expand="${i}">Ler tudo</button>` : ""}<button class="btn sm" data-copydoc="${i}">Copiar</button><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
+    <div class="row">${short ? `<button class="btn sm" data-expand="${i}">Ler tudo</button>` : ""}${t.word ? `<a class="btn primary sm" href="${esc(t.word)}" target="_blank" rel="noopener">Descarregar Word</a>` : ""}<button class="btn sm" data-copydoc="${i}">Copiar</button><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
 }
 function showWork(list) {
   const base = docs.length; docs.push(...list);
@@ -515,7 +530,9 @@ async function loadTrabalhos() {
     const tags = n.etiquetas || [];
     if (tags.includes("imagem")) return { tipo: "imagem", titulo, url: conteudo.trim().split(/\s/)[0], quando: n.criado };
     if (tags.includes("apresentacao")) { const url = conteudo.trim().split(/\s/)[0]; return { tipo: "apresentacao", titulo, url, conteudo: conteudo.slice(conteudo.indexOf(url) + url.length).trim(), quando: n.criado }; }
-    return { titulo, conteudo, quando: n.criado };
+    let word = ""; const wm = conteudo.match(/\n*\[word\]\((https?:[^)]+)\)\s*$/);
+    if (wm) { word = wm[1]; conteudo = conteudo.slice(0, wm.index); }
+    return { titulo, conteudo, word, quando: n.criado };
   });
   $("#trabCard").hidden = !items.length;
   const base = docs.length; docs.push(...items);
