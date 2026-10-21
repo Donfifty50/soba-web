@@ -129,6 +129,13 @@ nav.tabs .badge{position:absolute;top:2px;left:calc(50% + 6px);background:var(--
 .word i{font-style:normal;color:var(--accent)}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--safe-b) + 84px);z-index:40;background:var(--text);color:var(--bg);padding:10px 14px;border-radius:12px;font-size:14px;font-weight:500;max-width:calc(100vw - 32px)}
 .install{border:1px dashed var(--line);border-radius:14px;padding:12px 14px;font-size:13.5px;color:var(--muted)}
+.doc{background:var(--surface);border:1px solid color-mix(in srgb,var(--violet) 45%,transparent);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.doc .md{font-size:15px;line-height:1.6;overflow-wrap:anywhere}
+.doc .md h2,.doc .md h3{font-family:var(--display);font-size:17px;margin:14px 0 4px}
+.doc .md h1{font-family:var(--display);font-size:20px;margin:6px 0}
+.doc .md ul,.doc .md ol{margin:4px 0;padding-left:20px}
+.doc .md p{margin:6px 0}
+.doc .md.short{max-height:220px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 </head>
@@ -157,11 +164,13 @@ nav.tabs .badge{position:absolute;top:2px;left:calc(50% + 6px);background:var(--
       <p class="reply" id="reply" hidden></p>
       <p class="note crit" id="err" hidden></p>
     </div>
+    <div id="work" style="display:flex;flex-direction:column;gap:12px"></div>
     <form class="ask" id="askForm"><input id="askIn" placeholder="Ou escreve ao SOBA…" enterkeyhint="send" autocomplete="off"><button class="btn primary" type="submit" aria-label="Enviar">▲</button></form>
     <div class="card hot" id="briefCard" role="button" tabindex="0">
       <div class="label"><span>Resumo das 08:00</span><span style="color:var(--accent);letter-spacing:0;text-transform:none;font-family:var(--body);font-weight:700;font-size:14px" id="briefBtn">Dizer bom dia ▸</span></div>
       <div id="brief"><p class="empty">Toca aqui ou diz «bom dia» à esfera. O SOBA diz-te o dinheiro que entrou, quem está à espera, o que há para hoje e o que aconteceu de noite.</p></div>
     </div>
+    <div class="card" id="trabCard" hidden><div class="label">Trabalhos feitos</div><div id="trabList"></div></div>
     <div class="card"><div class="label">Números</div>
       <div class="stats">
         <div class="stat"><div class="v" id="sOntem">0 Kz</div><div class="l">Entrou ontem</div></div>
@@ -430,13 +439,15 @@ let turns = [];
 try { turns = JSON.parse(sessionStorage.getItem("soba.turns") || "[]"); } catch (_) {}
 async function ask(text) {
   text = (text || "").trim(); if (!text) return;
-  showErr(""); $("#heard").textContent = "«" + text + "»"; $("#heard").hidden = false; $("#reply").hidden = true;
+  showErr(""); $("#heard").textContent = "«" + text + "»"; $("#heard").hidden = false; $("#reply").hidden = true; $("#work").innerHTML = "";
   setOrb("thinking");
   turns = [...turns, { role: "user", content: text }].slice(-14);
   try {
     const d = await fn("soba-chat", { messages: turns });
     const r = (d && d.resposta || "").trim() || "Não percebi. Podes repetir?";
-    turns.push({ role: "assistant", content: r });
+    const trab = (d && d.trabalhos) || [];
+    turns.push({ role: "assistant", content: r + trab.map((t) => `\n\n[Trabalho entregue: ${t.titulo}]\n${t.conteudo.slice(0, 5000)}`).join("") });
+    if (trab.length) { showWork(trab); loadTrabalhos(); }
     try { sessionStorage.setItem("soba.turns", JSON.stringify(turns)); } catch (_) {}
     $("#reply").textContent = r; $("#reply").hidden = false;
     setOrb("speaking"); await say(r);
@@ -454,6 +465,48 @@ $("#orb").addEventListener("click", () => {
   showErr(""); startListening();
 });
 $("#askForm").addEventListener("submit", (e) => { e.preventDefault(); unlockSpeech(); const t = $("#askIn").value; $("#askIn").value = ""; $("#askIn").blur(); ask(t); });
+
+/* ---------- Trabalhos ---------- */
+function md(src) {
+  const lines = esc(src).split("\n"); let out = "", list = null;
+  const inline = (t) => t.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/(^|\s)\*(.+?)\*/g, "$1<i>$2</i>");
+  const close = () => { if (list) { out += `</${list}>`; list = null; } };
+  for (const raw of lines) {
+    const l = raw.trimEnd();
+    let m;
+    if ((m = l.match(/^(#{1,3})\s+(.*)/))) { close(); const n = Math.max(1, Math.min(3, m[1].length)); out += `<h${n}>${inline(m[2])}</h${n}>`; }
+    else if ((m = l.match(/^\s*[-•]\s+(.*)/))) { if (list !== "ul") { close(); out += "<ul>"; list = "ul"; } out += `<li>${inline(m[1])}</li>`; }
+    else if ((m = l.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== "ol") { close(); out += "<ol>"; list = "ol"; } out += `<li>${inline(m[1])}</li>`; }
+    else if (!l.trim()) { close(); }
+    else { close(); out += `<p>${inline(l)}</p>`; }
+  }
+  close(); return out;
+}
+let docs = [];
+function docCard(t, i, short) {
+  return `<div class="doc"><div class="between"><span class="chip acc">Trabalho</span><span class="s mono" style="font-size:12px;color:var(--muted)">${t.quando ? fmtDate(t.quando) : "agora"}</span></div>
+    <div style="font-family:var(--display);font-weight:600;font-size:18px">${esc(t.titulo)}</div>
+    <div class="md ${short ? "short" : ""}" id="md-${i}">${md(t.conteudo)}</div>
+    <div class="row">${short ? `<button class="btn sm" data-expand="${i}">Ler tudo</button>` : ""}<button class="btn sm" data-copydoc="${i}">Copiar</button><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
+}
+function showWork(list) {
+  const base = docs.length; docs.push(...list);
+  $("#work").innerHTML = list.map((t, k) => docCard(t, base + k, false)).join("");
+}
+async function loadTrabalhos() {
+  const { data } = await sb.from("notes").select("texto,criado").contains("etiquetas", ["trabalho"]).order("criado", { ascending: false }).limit(8);
+  const items = (data || []).map((n) => { const m = n.texto.match(/^#\s*(.*)\n+([\s\S]*)$/); return { titulo: m ? m[1] : "Trabalho", conteudo: m ? m[2] : n.texto, quando: n.criado }; });
+  $("#trabCard").hidden = !items.length;
+  const base = docs.length; docs.push(...items);
+  $("#trabList").innerHTML = items.map((t, k) => `<div class="it"><div class="between"><div style="min-width:0"><div class="t">${esc(t.titulo)}</div><div class="s">${fmtDate(t.quando)}</div></div><button class="btn sm" data-open="${base + k}">Abrir</button></div></div>`).join("");
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.expand) { const el = $("#md-" + b.dataset.expand); el.classList.remove("short"); b.remove(); }
+  if (b.dataset.open) { $("#work").innerHTML = docCard(docs[+b.dataset.open], +b.dataset.open, false); $("#work").scrollIntoView({ behavior: "smooth" }); }
+  if (b.dataset.copydoc) { const t = docs[+b.dataset.copydoc]; try { await navigator.clipboard.writeText(t.titulo + "\n\n" + t.conteudo); toast("Copiado."); } catch (_) { toast("Não consegui copiar."); } }
+  if (b.dataset.share) { const t = docs[+b.dataset.share]; try { await navigator.share({ title: t.titulo, text: t.titulo + "\n\n" + t.conteudo }); } catch (_) {} }
+});
 
 /* ---------- Hoje ---------- */
 const DOT = { ok: "var(--ok)", warn: "var(--warn)", crit: "var(--crit)", info: "var(--accent)" };
@@ -485,6 +538,7 @@ async function loadHoje() {
   $("#sAprovar").textContent = n; $("#sAprovar").className = "v" + (n ? " warn" : "");
   $("#apBadge").textContent = n; $("#apBadge").hidden = !n;
   if (br.data && br.data[0]) renderBrief(br.data[0]);
+  loadTrabalhos();
 }
 let briefBusy = false;
 async function bomDia() {
