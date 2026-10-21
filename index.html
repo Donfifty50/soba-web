@@ -135,6 +135,9 @@ nav.tabs .badge{position:absolute;top:2px;left:calc(50% + 6px);background:var(--
 .doc .md h1{font-family:var(--display);font-size:20px;margin:6px 0}
 .doc .md ul,.doc .md ol{margin:4px 0;padding-left:20px}
 .doc .md p{margin:6px 0}
+.doc img.gen{width:100%;border-radius:12px;background:var(--surface2);display:block}
+.doc .slides{display:flex;flex-direction:column;gap:6px;counter-reset:sl}
+.doc .slides div{background:var(--surface2);border-radius:10px;padding:8px 12px;font-size:14px}
 .doc .md.short{max-height:220px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
@@ -375,7 +378,7 @@ function stopSpeaking() { speakToken++; try { player.pause(); } catch (_) {} try
 
 function setOrb(s) {
   $("#orb").dataset.s = s;
-  $("#status").textContent = { idle: "Toca na esfera e fala", listening: "A ouvir… toca quando acabares", thinking: "A pensar…", speaking: "Toca para interromper" }[s];
+  $("#status").textContent = { idle: "Toca na esfera e fala", listening: "A ouvir… toca quando acabares", thinking: "A trabalhar… (imagens e apresentações levam até 1 minuto)", speaking: "Toca para interromper" }[s];
 }
 function showErr(t) { const e = $("#err"); e.textContent = t; e.hidden = !t; }
 
@@ -446,8 +449,9 @@ async function ask(text) {
     const d = await fn("soba-chat", { messages: turns });
     const r = (d && d.resposta || "").trim() || "Não percebi. Podes repetir?";
     const trab = (d && d.trabalhos) || [];
-    turns.push({ role: "assistant", content: r + trab.map((t) => `\n\n[Trabalho entregue: ${t.titulo}]\n${t.conteudo.slice(0, 5000)}`).join("") });
-    if (trab.length) { showWork(trab); loadTrabalhos(); }
+    const fich = (d && d.ficheiros) || [];
+    turns.push({ role: "assistant", content: r + trab.map((t) => `\n\n[Trabalho entregue: ${t.titulo}]\n${t.conteudo.slice(0, 5000)}`).join("") + fich.map((f) => `\n\n[${f.tipo === "imagem" ? "Imagem criada" : "Apresentação criada"}: ${f.titulo}]` + (f.slides ? "\n" + f.slides.map((x, k) => `${k + 1}. ${x.titulo}`).join("\n") : "")).join("") });
+    if (trab.length || fich.length) { showWork([...fich, ...trab]); loadTrabalhos(); }
     try { sessionStorage.setItem("soba.turns", JSON.stringify(turns)); } catch (_) {}
     $("#reply").textContent = r; $("#reply").hidden = false;
     setOrb("speaking"); await say(r);
@@ -484,8 +488,19 @@ function md(src) {
 }
 let docs = [];
 function docCard(t, i, short) {
-  return `<div class="doc"><div class="between"><span class="chip acc">Trabalho</span><span class="s mono" style="font-size:12px;color:var(--muted)">${t.quando ? fmtDate(t.quando) : "agora"}</span></div>
-    <div style="font-family:var(--display);font-weight:600;font-size:18px">${esc(t.titulo)}</div>
+  const head = `<div class="between"><span class="chip acc">${t.tipo === "imagem" ? "Imagem" : t.tipo === "apresentacao" ? "Apresentação" : "Trabalho"}</span><span class="s mono" style="font-size:12px;color:var(--muted)">${t.quando ? fmtDate(t.quando) : "agora"}</span></div>
+    <div style="font-family:var(--display);font-weight:600;font-size:18px">${esc(t.titulo)}</div>`;
+  if (t.tipo === "imagem") {
+    return `<div class="doc">${head}<a href="${esc(t.url)}" target="_blank" rel="noopener"><img class="gen" src="${esc(t.url)}" alt="${esc(t.titulo)}" loading="lazy"></a>
+      <p class="s" style="font-size:12.5px;color:var(--muted)">Para guardar no iPhone: toca na imagem e depois carrega nela sem largar → Guardar nas Fotos.</p>
+      <div class="row"><a class="btn sm" href="${esc(t.url)}" target="_blank" rel="noopener">Abrir</a><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
+  }
+  if (t.tipo === "apresentacao") {
+    const sl = (t.slides || []).map((x, k) => `<div><b>${k + 1}.</b> ${esc(x.titulo || "")}</div>`).join("");
+    return `<div class="doc">${head}${sl ? `<div class="slides">${sl}</div>` : (t.conteudo ? `<div class="md short" id="md-${i}">${md(t.conteudo)}</div>` : "")}
+      <div class="row"><a class="btn primary sm" href="${esc(t.url)}" target="_blank" rel="noopener">Descarregar PowerPoint</a><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
+  }
+  return `<div class="doc">${head}
     <div class="md ${short ? "short" : ""}" id="md-${i}">${md(t.conteudo)}</div>
     <div class="row">${short ? `<button class="btn sm" data-expand="${i}">Ler tudo</button>` : ""}<button class="btn sm" data-copydoc="${i}">Copiar</button><button class="btn ghost sm" data-share="${i}">Partilhar</button></div></div>`;
 }
@@ -494,8 +509,14 @@ function showWork(list) {
   $("#work").innerHTML = list.map((t, k) => docCard(t, base + k, false)).join("");
 }
 async function loadTrabalhos() {
-  const { data } = await sb.from("notes").select("texto,criado").contains("etiquetas", ["trabalho"]).order("criado", { ascending: false }).limit(8);
-  const items = (data || []).map((n) => { const m = n.texto.match(/^#\s*(.*)\n+([\s\S]*)$/); return { titulo: m ? m[1] : "Trabalho", conteudo: m ? m[2] : n.texto, quando: n.criado }; });
+  const { data } = await sb.from("notes").select("texto,criado,etiquetas").contains("etiquetas", ["trabalho"]).order("criado", { ascending: false }).limit(10);
+  const items = (data || []).map((n) => {
+    const m = n.texto.match(/^#\s*(.*)\n+([\s\S]*)$/); const titulo = m ? m[1] : "Trabalho"; let conteudo = m ? m[2] : n.texto;
+    const tags = n.etiquetas || [];
+    if (tags.includes("imagem")) return { tipo: "imagem", titulo, url: conteudo.trim().split(/\s/)[0], quando: n.criado };
+    if (tags.includes("apresentacao")) { const url = conteudo.trim().split(/\s/)[0]; return { tipo: "apresentacao", titulo, url, conteudo: conteudo.slice(conteudo.indexOf(url) + url.length).trim(), quando: n.criado }; }
+    return { titulo, conteudo, quando: n.criado };
+  });
   $("#trabCard").hidden = !items.length;
   const base = docs.length; docs.push(...items);
   $("#trabList").innerHTML = items.map((t, k) => `<div class="it"><div class="between"><div style="min-width:0"><div class="t">${esc(t.titulo)}</div><div class="s">${fmtDate(t.quando)}</div></div><button class="btn sm" data-open="${base + k}">Abrir</button></div></div>`).join("");
@@ -505,7 +526,7 @@ document.addEventListener("click", async (e) => {
   if (b.dataset.expand) { const el = $("#md-" + b.dataset.expand); el.classList.remove("short"); b.remove(); }
   if (b.dataset.open) { $("#work").innerHTML = docCard(docs[+b.dataset.open], +b.dataset.open, false); $("#work").scrollIntoView({ behavior: "smooth" }); }
   if (b.dataset.copydoc) { const t = docs[+b.dataset.copydoc]; try { await navigator.clipboard.writeText(t.titulo + "\n\n" + t.conteudo); toast("Copiado."); } catch (_) { toast("Não consegui copiar."); } }
-  if (b.dataset.share) { const t = docs[+b.dataset.share]; try { await navigator.share({ title: t.titulo, text: t.titulo + "\n\n" + t.conteudo }); } catch (_) {} }
+  if (b.dataset.share) { const t = docs[+b.dataset.share]; try { await navigator.share(t.url ? { title: t.titulo, url: t.url } : { title: t.titulo, text: t.titulo + "\n\n" + t.conteudo }); } catch (_) {} }
 });
 
 /* ---------- Hoje ---------- */
